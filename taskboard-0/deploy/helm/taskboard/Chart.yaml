@@ -1,0 +1,6 @@
+apiVersion: v2
+name: taskboard
+description: TaskBoard backend (FastAPI) + PostgreSQL. Same chart locally (minikube) and on EKS - only the values differ.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

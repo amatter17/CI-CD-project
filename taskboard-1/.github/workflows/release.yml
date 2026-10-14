@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  # 1. promote, don't rebuild: add the release tag to the image CI already built, scanned and pushed
+  promote-image:
+    name: Promote image sha-<commit> -> release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Add the release tag to the CI image
+        env:
+          REPO_URL: ${{ vars.ECR_REPOSITORY_URL }}
+        run: |
+          set -euo pipefail
+          repo="${REPO_URL#*/}"
+          src="sha-${GITHUB_SHA}"
+
+          # the backend workflow on main may still be pushing this commit: wait up to 15 minutes
+          manifest=""
+          for _ in $(seq 1 30); do
+            manifest=$(aws ecr batch-get-image --repository-name "$repo" --image-ids imageTag="$src" \
+                       --query 'images[0].imageManifest' --output text 2>/dev/null || true)
+            [ -n "$manifest" ] && [ "$manifest" != "None" ] && break
+            echo "image $src not in ECR yet..."; sleep 30
+          done
+          if [ -z "$manifest" ] || [ "$manifest" = "None" ]; then
+            echo "::error::No image $src in ECR. Release from a commit on main whose Backend workflow succeeded."
+            exit 1
+          fi
+
+          # immutable tags: a re-run must not fail if the tag already points to this image
+          existing=$(aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$TAG" \
+                     --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)
+          wanted=$(aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$src" \
+                   --query 'imageDetails[0].imageDigest' --output text)
+          if [ -n "$existing" ] && [ "$existing" != "None" ]; then
+            [ "$existing" = "$wanted" ] && { echo "$TAG already points to $wanted"; exit 0; }
+            echo "::error::$TAG already exists in ECR and points to a different image ($existing)"; exit 1
+          fi
+
+          aws ecr put-image --repository-name "$repo" --image-tag "$TAG" --image-manifest "$manifest" >/dev/null
+          echo "### Promoted \`$src\` -> \`$TAG\` ($wanted)" >> "$GITHUB_STEP_SUMMARY"
+
+  # 2. the deployment approval is a reviewed Pull Request that changes backend.image.tag in values-prod.yaml
+  gitops-pr:
+    name: Open the GitOps pull request
+    needs: promote-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Set backend.image.tag in values-prod.yaml
+        run: |
+          set -euo pipefail
+          f=deploy/helm/taskboard/values-prod.yaml
+          sed -i -E "s|^(\s*tag:\s*)\S+(\s*# release-managed.*)\$|\1${TAG}\2|" "$f"
+          grep -n 'release-managed' "$f"
+          grep -q "tag: ${TAG} " "$f" || grep -q "tag: ${TAG}\$" "$f" || { echo "::error::tag line not updated"; exit 1; }
+
+      - name: Create / update the pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          # PRs created with GITHUB_TOKEN do not trigger other workflows; set RELEASE_PR_TOKEN (a PAT) if your ruleset
+          # requires status checks on this PR, or let a repository admin bypass the ruleset for release PRs.
+          token: ${{ secrets.RELEASE_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          branch: release/${{ env.TAG }}
+          base: main
+          commit-message: "deploy: backend ${{ env.TAG }}"
+          title: "Deploy backend ${{ env.TAG }}"
+          body: |
+            Promotes backend image `${{ env.TAG }}` (same image as `sha-${{ github.sha }}`, not rebuilt).
+
+            **Merging this PR is the production deployment approval**: Argo CD sees the changed
+            `deploy/helm/taskboard/values-prod.yaml` and redeploys the backend.
+
+            Rollback = `git revert` of the merge commit.
+          delete-branch: true
+
+  # 3. frontend: build with the version, upload to S3, invalidate CloudFront
+  deploy-frontend:
+    name: Deploy frontend ${{ github.event.release.tag_name }}
+    needs: promote-image
+    runs-on: ubuntu-latest
+    # required reviewer: each release shows up under the repository's Deployments
+    environment:
+      name: production
+      url: ${{ vars.APP_URL }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Build
+        working-directory: app/frontend
+        env:
+          NEXT_PUBLIC_APP_VERSION: ${{ env.TAG }}
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Upload to S3
+        working-directory: app/frontend
+        env:
+          BUCKET: ${{ vars.FRONTEND_BUCKET }}
+        run: |
+          set -euo pipefail
+          # content-hashed assets: cache for a year
+          aws s3 sync out/_next "s3://$BUCKET/_next" --delete \
+            --cache-control "public,max-age=31536000,immutable"
+          # HTML and everything else: always revalidate
+          aws s3 sync out "s3://$BUCKET" --delete --exclude "_next/*" \
+            --cache-control "no-cache"
+
+      - name: Invalidate CloudFront
+        env:
+          DISTRIBUTION: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: |
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths "/*" \
+            --query 'Invalidation.Id' --output text
+          echo "### Frontend ${TAG} deployed to ${{ vars.APP_URL }}" >> "$GITHUB_STEP_SUMMARY"

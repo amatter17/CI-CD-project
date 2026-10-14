@@ -1,0 +1,123 @@
+name: pre-build-scan
+description: >
+  Security gate BEFORE building: secrets in the commits (gitleaks + trufflehog), dependencies / secrets / misconfigurations
+  (trivy fs), and the SonarQube quality gate. Reports are uploaded as an artifact even when a scan fails.
+  The caller must check out with fetch-depth: 0 (the secret scanners read the commits).
+inputs:
+  scan-path:
+    description: Path scanned by Trivy
+    default: "."
+  trivy-severity:
+    default: HIGH,CRITICAL
+  run-sonar:
+    description: '"true" to run the SonarQube scan + quality gate'
+    default: "false"
+  sonar-project-dir:
+    description: Directory containing sonar-project.properties
+    default: "."
+  sonar-project-key:
+    description: Overrides sonar.projectKey (SonarQube Cloud keys are usually <org>_<project>)
+    default: ""
+  sonar-token:
+    default: ""
+  sonar-host-url:
+    default: https://sonarcloud.io
+  sonar-organization:
+    default: ""
+  github-token:
+    description: Token for the gitleaks action
+    required: true
+  gitleaks-license:
+    description: Needed only for repositories owned by an organization
+    default: ""
+  artifact-name:
+    description: Unique artifact name for this job's reports
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Prepare report folder
+      shell: bash
+      run: mkdir -p reports
+
+    # --- secrets in the commits -------------------------------------------------------------------------------
+    - name: Gitleaks
+      uses: gitleaks/gitleaks-action@v2.3.9 # pin-sha
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITLEAKS_LICENSE: ${{ inputs.gitleaks-license }}
+        GITLEAKS_ENABLE_SUMMARY: "true"
+        GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+
+    - name: TruffleHog - commit range
+      id: range
+      if: always()
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        BEFORE: ${{ github.event.before }}
+        SHA: ${{ github.sha }}
+      run: |
+        zero=0000000000000000000000000000000000000000
+        if [ "$EVENT" = "pull_request" ]; then
+          base="$PR_BASE"; head="$PR_HEAD"
+        elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "$zero" ]; then
+          base="$BEFORE"; head="$SHA"
+        else
+          base="$(git rev-list --max-parents=0 HEAD | tail -1)"; head="$SHA"
+        fi
+        if [ "$base" = "$head" ]; then base=""; fi
+        echo "base=$base" >> "$GITHUB_OUTPUT"; echo "head=$head" >> "$GITHUB_OUTPUT"
+
+    - name: TruffleHog
+      if: always()
+      uses: trufflesecurity/trufflehog@v3.99.2 # pin-sha
+      with:
+        path: ./
+        base: ${{ steps.range.outputs.base }}
+        head: ${{ steps.range.outputs.head }}
+        extra_args: --results=verified,unverified,unknown --fail
+
+    # --- dependencies, secrets, misconfigurations --------------------------------------------------------------
+    - name: Trivy fs scan
+      if: always()
+      uses: aquasecurity/trivy-action@v0.36.0 # pin-sha
+      with:
+        scan-type: fs
+        scan-ref: ${{ inputs.scan-path }}
+        scanners: vuln,secret,misconfig
+        severity: ${{ inputs.trivy-severity }}
+        exit-code: "1"
+        format: table
+        output: reports/trivy-fs.txt
+        version: v0.75.0
+        # .trivyignore at the repository root is read automatically (each entry needs a written reason)
+
+    - name: Show Trivy report in the log
+      if: always()
+      shell: bash
+      run: cat reports/trivy-fs.txt 2>/dev/null || true
+
+    # --- code quality ----------------------------------------------------------------------------------------
+    - name: SonarQube scan + quality gate
+      if: inputs.run-sonar == 'true' && inputs.sonar-token != ''
+      uses: SonarSource/sonarqube-scan-action@v5.3.0 # pin-sha
+      env:
+        SONAR_TOKEN: ${{ inputs.sonar-token }}
+        SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+      with:
+        projectBaseDir: ${{ inputs.sonar-project-dir }}
+        args: >
+          -Dsonar.organization=${{ inputs.sonar-organization }}
+          ${{ inputs.sonar-project-key != '' && format('-Dsonar.projectKey={0}', inputs.sonar-project-key) || '' }}
+          -Dsonar.qualitygate.wait=true
+
+    - name: Upload scan reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: reports/
+        if-no-files-found: ignore

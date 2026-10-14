@@ -1,0 +1,30 @@
+# Python / Node
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+coverage.xml
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Local scan output
+reports/
+.scannerwork/
+
+# Terraform (Part B)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+tfplan
+crash.log
+
+# Local env files (never commit secrets)
+.env
+local-setup/.env
+.DS_Store

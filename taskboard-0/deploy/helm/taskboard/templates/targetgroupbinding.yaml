@@ -1,0 +1,14 @@
+{{- if .Values.targetGroupBinding.enabled }}
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: {{ include "taskboard.fullname" . }}-backend
+  labels:
+    {{- include "taskboard.labels" . | nindent 4 }}
+spec:
+  serviceRef:
+    name: {{ include "taskboard.fullname" . }}-backend
+    port: {{ .Values.backend.service.port }}
+  targetGroupARN: {{ required "targetGroupBinding.targetGroupArn is required when targetGroupBinding.enabled=true" .Values.targetGroupBinding.targetGroupArn | quote }}
+  targetType: ip
+{{- end }}

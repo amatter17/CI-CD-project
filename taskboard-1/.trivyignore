@@ -1,0 +1,22 @@
+# Accepted risks. EVERY entry needs a written reason. Run `local-setup/scan.sh trivy-fs` and keep this list as short as possible.
+# Format: one finding ID per line; comments above it.
+
+# --- Terraform: CloudFront / ALB design (see README "Decisions & trade-offs") ---------------------------------------
+# ALB is internet-facing by design: its security group only accepts CloudFront origin-facing IPs and the listener
+# forwards only requests with the secret X-Origin-Verify header (VPC origins make it internal: stretch goal).
+AWS-0053
+# CloudFront -> ALB is plain HTTP in this lab (needs a custom domain + ACM certificate: stretch goal). Traffic stays
+# inside AWS and is protected by the header secret + CloudFront-only security group.
+AWS-0054
+# No AWS WAF in front of CloudFront: cost (WAF ~ 6+ USD/month) and out of scope for the lab.
+AWS-0011
+# CloudFront default certificate (*.cloudfront.net) cannot enforce TLS >= 1.2; fixed with a custom domain (stretch goal).
+AWS-0012
+# --- Terraform: EKS public API endpoint -----------------------------------------------------------------------------
+# GitHub-hosted runners (Helm provider) and the student laptop reach the API over the internet. Access is IAM-only
+# (access entries); a private endpoint + self-hosted runner is the production setup.
+AWS-0040
+AWS-0041
+# --- Terraform: IAM wildcards ---------------------------------------------------------------------------------------
+# ecr:GetAuthorizationToken and Describe* read-only calls only exist with Resource "*".
+AWS-0057

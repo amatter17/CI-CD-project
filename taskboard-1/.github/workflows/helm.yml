@@ -1,0 +1,83 @@
+name: Helm
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.c.outputs.run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: c
+        uses: ./.github/actions/changes
+        with:
+          pattern: '^(deploy/|gitops/|\.github/(actions|workflows/helm\.yml)|\.trivyignore)'
+
+  chart:
+    name: Lint, template, scan
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/taskboard
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: helm lint (local + prod values)
+        run: |
+          helm lint "$CHART" -f "$CHART/values-local.yaml"
+          helm lint "$CHART" -f "$CHART/values-prod.yaml"
+
+      - name: helm template (local + prod values)
+        run: |
+          mkdir -p reports
+          helm template taskboard "$CHART" -n taskboard -f "$CHART/values-local.yaml" > reports/rendered-local.yaml
+          helm template taskboard "$CHART" -n taskboard -f "$CHART/values-prod.yaml"  > reports/rendered-prod.yaml
+          grep -c '^kind:' reports/rendered-local.yaml reports/rendered-prod.yaml
+
+      - name: Upload rendered manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-rendered
+          path: reports/
+
+      - name: Pre-build scan of the chart
+        uses: ./.github/actions/pre-build-scan
+        with:
+          scan-path: deploy
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gitleaks-license: ${{ secrets.GITLEAKS_LICENSE }}
+          artifact-name: helm-pre-build-scan
+
+  ci-passed:
+    name: Helm CI passed
+    needs: [changes, chart]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarise
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          case "$RESULTS" in *failure*|*cancelled*) exit 1 ;; esac

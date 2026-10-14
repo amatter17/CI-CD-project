@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "taskboard.fullname" . }}-test
+  labels:
+    {{- include "taskboard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: api-test
+      # the backend image already contains Python: no extra image to pull
+      image: {{ include "taskboard.backend.image" . | quote }}
+      imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+      env:
+        - name: API
+          value: http://{{ include "taskboard.fullname" . }}-backend:{{ .Values.backend.service.port }}/api
+      command: ["python", "-c"]
+      args:
+        - |
+          import json, os, urllib.request
+          api = os.environ["API"]
+
+          def call(method, path, body=None):
+              data = json.dumps(body).encode() if body is not None else None
+              req = urllib.request.Request(api + path, data=data, method=method,
+                                           headers={"Content-Type": "application/json"})
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  raw = r.read()
+                  return json.loads(raw) if raw else None
+
+          print("health:", call("GET", "/health/ready"))
+          task = call("POST", "/tasks", {"title": "helm test task"})
+          print("created:", task)
+          assert any(t["id"] == task["id"] for t in call("GET", "/tasks")), "created task not listed"
+          call("DELETE", "/tasks/%d" % task["id"])
+          print("TEST PASSED")
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 128Mi
+      securityContext:
+        {{- include "taskboard.containerSecurityContext" . | nindent 8 }}

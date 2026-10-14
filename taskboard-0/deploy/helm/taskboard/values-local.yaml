@@ -1,0 +1,21 @@
+# minikube: image loaded with `minikube image load`, plain Secret, default StorageClass, no ALB
+backend:
+  replicas: 1
+  image:
+    repository: taskboard-backend
+    tag: local
+    pullPolicy: Never
+  environment: local
+
+postgres:
+  storage:
+    size: 1Gi
+    storageClass: ""        # minikube default ("standard")
+
+credentials:
+  mode: plain
+  plain:
+    password: local-dev-password   # local-only throwaway value
+
+targetGroupBinding:
+  enabled: false

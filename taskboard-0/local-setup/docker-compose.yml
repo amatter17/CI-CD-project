@@ -1,0 +1,82 @@
+# TaskBoard local stack: nginx (frontend + /api proxy) -> backend -> postgres
+#   docker compose up --build            # everything
+#   docker compose --profile sonar up -d # + SonarQube on :9000
+name: taskboard
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-taskboard}
+      POSTGRES_USER: ${DB_USER:-taskboard}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-taskboard}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ../app/backend
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
+    image: taskboard-backend:local
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-taskboard}
+      DB_USER: ${DB_USER:-taskboard}
+      DB_PASSWORD: ${DB_PASSWORD:-taskboard}
+      APP_VERSION: ${APP_VERSION:-local}
+      ENVIRONMENT: local
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # the slim image has no curl: use Python. urlopen raises on HTTP 503, so this is a real readiness check
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../app/frontend
+      args:
+        NEXT_PUBLIC_APP_VERSION: ${APP_VERSION:-local}
+    image: taskboard-frontend:local
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sonarqube:
+    image: sonarqube:community
+    profiles: ["sonar"]
+    ports:
+      - "9000:9000"
+    environment:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    volumes:
+      - sonar_data:/opt/sonarqube/data
+      - sonar_extensions:/opt/sonarqube/extensions
+      - sonar_logs:/opt/sonarqube/logs
+
+volumes:
+  pgdata:
+  sonar_data:
+  sonar_extensions:
+  sonar_logs:

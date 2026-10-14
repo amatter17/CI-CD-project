@@ -1,0 +1,22 @@
+# Argo CD Application for minikube (Phase A6). Argo CD pulls from Git: it needs a PUBLIC GitHub repo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: taskboard
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR_GITHUB_USER/taskboard.git   # WHICH repo
+    targetRevision: main                                         # WHICH branch
+    path: deploy/helm/taskboard                                  # WHICH folder (your chart)
+    helm:
+      valueFiles: [values-local.yaml]                            # WHICH values
+  destination:
+    server: https://kubernetes.default.svc                       # WHERE: this cluster
+    namespace: taskboard
+  syncPolicy:
+    automated:
+      prune: true        # remove what was removed from Git
+      selfHeal: true     # undo manual changes (kubectl edit/scale)
+    syncOptions: [CreateNamespace=true]

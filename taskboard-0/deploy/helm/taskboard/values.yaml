@@ -1,0 +1,59 @@
+# Defaults shared by every environment. Per-environment overrides: values-local.yaml / values-prod.yaml
+nameOverride: ""
+fullnameOverride: ""
+
+backend:
+  replicas: 1
+  image:
+    repository: taskboard-backend
+    tag: local
+    pullPolicy: IfNotPresent
+  # Shown by /api/health. Empty = use the image tag (so a promoted tag like v1.0.0 is what the UI shows)
+  appVersion: ""
+  environment: local
+  service:
+    port: 8000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  extraEnv: []
+
+postgres:
+  image:
+    repository: postgres
+    tag: 17-alpine
+    pullPolicy: IfNotPresent
+  storage:
+    size: 1Gi
+    storageClass: ""        # empty = the cluster's default StorageClass
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+database:
+  name: taskboard
+  user: taskboard
+  port: 5432
+
+# Where the DB password comes from
+credentials:
+  # plain    -> a normal Secret rendered from credentials.plain.password (LOCAL ONLY, never commit real passwords)
+  # external -> SecretStore + ExternalSecret reading AWS Secrets Manager (Part B)
+  mode: plain
+  plain:
+    password: ""
+  external:
+    region: eu-west-1
+    remoteKey: ""            # name of the Secrets Manager secret (plain string value)
+    refreshInterval: 1h
+
+# Registers the backend Service in the ALB target group created by Terraform (Part B, needs the AWS Load Balancer Controller)
+targetGroupBinding:
+  enabled: false
+  targetGroupArn: ""

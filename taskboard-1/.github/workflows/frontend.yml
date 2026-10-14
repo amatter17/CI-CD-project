@@ -1,0 +1,91 @@
+name: Frontend
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.c.outputs.run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: c
+        uses: ./.github/actions/changes
+        with:
+          pattern: '^(app/frontend/|\.github/(actions|workflows/frontend\.yml)|\.trivyignore)'
+
+  build:
+    name: Scan, lint, typecheck, build
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/frontend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Pre-build scan
+        uses: ./.github/actions/pre-build-scan
+        with:
+          scan-path: app/frontend
+          run-sonar: "true"
+          sonar-project-dir: app/frontend
+          sonar-project-key: ${{ vars.SONAR_FRONTEND_PROJECT_KEY }}
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+          sonar-host-url: ${{ vars.SONAR_HOST_URL }}
+          sonar-organization: ${{ vars.SONAR_ORGANIZATION }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gitleaks-license: ${{ secrets.GITLEAKS_LICENSE }}
+          artifact-name: frontend-pre-build-scan
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+
+      - name: Build static site
+        env:
+          NEXT_PUBLIC_APP_VERSION: sha-${{ github.sha }}
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build
+
+      - name: Post-build scan of out/
+        uses: ./.github/actions/post-build-scan
+        with:
+          mode: fs
+          scan-path: app/frontend/out
+          artifact-name: frontend-post-build-scan
+
+  ci-passed:
+    name: Frontend CI passed
+    needs: [changes, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarise
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          case "$RESULTS" in *failure*|*cancelled*) exit 1 ;; esac

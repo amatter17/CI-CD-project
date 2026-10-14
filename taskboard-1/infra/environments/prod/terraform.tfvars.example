@@ -1,0 +1,5 @@
+# cp terraform.tfvars.example terraform.tfvars   (git-ignored). In CI these come from GitHub variables as TF_VAR_*.
+region                   = "eu-west-1"
+github_repository        = "YOUR_GITHUB_USER/taskboard"
+infra_role_arn           = "arn:aws:iam::123456789012:role/taskboard-github-infra"
+eks_admin_principal_arns = ["arn:aws:iam::123456789012:user/you"]

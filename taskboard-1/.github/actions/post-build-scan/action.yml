@@ -1,0 +1,75 @@
+name: post-build-scan
+description: >
+  Security gate AFTER building. mode=image: Trivy image scan (gate: CRITICAL) + CycloneDX SBOM.
+  mode=fs: Trivy fs scan of a build output folder (e.g. the frontend's out/). Reports are uploaded even when the scan fails.
+inputs:
+  mode:
+    description: image | fs
+    default: image
+  image-ref:
+    description: Image to scan (mode=image)
+    default: ""
+  scan-path:
+    description: Folder to scan (mode=fs)
+    default: "."
+  severity:
+    description: Severity that fails the pipeline
+    default: CRITICAL
+  artifact-name:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Prepare report folder
+      shell: bash
+      run: mkdir -p reports
+
+    - name: SBOM (CycloneDX) of the image
+      if: inputs.mode == 'image'
+      uses: aquasecurity/trivy-action@v0.36.0 # pin-sha
+      with:
+        scan-type: image
+        image-ref: ${{ inputs.image-ref }}
+        format: cyclonedx
+        output: reports/sbom.cdx.json
+        version: v0.75.0
+        exit-code: "0"
+
+    - name: Trivy image scan
+      if: inputs.mode == 'image'
+      uses: aquasecurity/trivy-action@v0.36.0 # pin-sha
+      with:
+        scan-type: image
+        image-ref: ${{ inputs.image-ref }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: "true"
+        exit-code: "1"
+        format: table
+        output: reports/trivy-image.txt
+        version: v0.75.0
+
+    - name: Trivy fs scan of the build output
+      if: inputs.mode == 'fs'
+      uses: aquasecurity/trivy-action@v0.36.0 # pin-sha
+      with:
+        scan-type: fs
+        scan-ref: ${{ inputs.scan-path }}
+        scanners: vuln,secret
+        severity: HIGH,CRITICAL
+        exit-code: "1"
+        format: table
+        output: reports/trivy-build-output.txt
+        version: v0.75.0
+
+    - name: Show report in the log
+      if: always()
+      shell: bash
+      run: cat reports/trivy-*.txt 2>/dev/null || true
+
+    - name: Upload reports (and SBOM)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: reports/
+        if-no-files-found: ignore

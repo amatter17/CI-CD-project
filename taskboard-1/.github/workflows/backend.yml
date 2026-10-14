@@ -1,0 +1,130 @@
+name: Backend
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.c.outputs.run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: c
+        uses: ./.github/actions/changes
+        with:
+          # pushes to main ALWAYS build (every main commit gets an image: the release workflow promotes it)
+          pattern: '^(app/backend/|\.github/(actions|workflows/backend\.yml)|\.trivyignore)'
+
+  build:
+    name: Lint, test, scan, build
+    needs: changes
+    if: needs.changes.outputs.run == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC to AWS (push to ECR, main only)
+    env:
+      IMAGE: taskboard-backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the secret scanners read the commits
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: app/backend/requirements-dev.txt
+
+      - name: Install dev dependencies
+        working-directory: app/backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (flake8)
+        working-directory: app/backend
+        run: flake8 .
+
+      - name: Tests + coverage
+        working-directory: app/backend
+        run: python -m pytest --cov=taskboard --cov-report=xml --cov-report=term
+
+      - name: Pre-build scan
+        uses: ./.github/actions/pre-build-scan
+        with:
+          scan-path: app/backend
+          run-sonar: "true"
+          sonar-project-dir: app/backend
+          sonar-project-key: ${{ vars.SONAR_BACKEND_PROJECT_KEY }}
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+          sonar-host-url: ${{ vars.SONAR_HOST_URL }}
+          sonar-organization: ${{ vars.SONAR_ORGANIZATION }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gitleaks-license: ${{ secrets.GITLEAKS_LICENSE }}
+          artifact-name: backend-pre-build-scan
+
+      - name: Docker build (fresh base image)
+        run: >
+          docker build --pull
+          --build-arg APP_VERSION=sha-${GITHUB_SHA::7}
+          -t "$IMAGE:${GITHUB_SHA}" app/backend
+
+      - name: Post-build scan (image gate + SBOM)
+        uses: ./.github/actions/post-build-scan
+        with:
+          mode: image
+          image-ref: taskboard-backend:${{ github.sha }}
+          artifact-name: backend-post-build-scan
+
+      - name: Configure AWS credentials (OIDC)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push sha-<commit> to ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+        env:
+          REPO_URL: ${{ vars.ECR_REPOSITORY_URL }}
+        run: |
+          set -euo pipefail
+          tag="sha-${GITHUB_SHA}"
+          repo_name="${REPO_URL#*/}"
+          # tags are immutable: a re-run of the same commit must not try to overwrite it
+          if aws ecr describe-images --repository-name "$repo_name" --image-ids imageTag="$tag" >/dev/null 2>&1; then
+            echo "$REPO_URL:$tag already exists - nothing to push"
+            exit 0
+          fi
+          docker tag "$IMAGE:${GITHUB_SHA}" "$REPO_URL:$tag"
+          docker push "$REPO_URL:$tag"
+          echo "### Pushed \`$REPO_URL:$tag\`" >> "$GITHUB_STEP_SUMMARY"
+
+  ci-passed:
+    name: Backend CI passed
+    needs: [changes, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarise
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          case "$RESULTS" in *failure*|*cancelled*) exit 1 ;; esac

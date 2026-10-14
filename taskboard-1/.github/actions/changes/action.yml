@@ -1,0 +1,39 @@
+name: changed-paths
+description: >
+  Tells a workflow whether any file matching a regex changed. Lets every workflow ALWAYS run its "ci-passed" job
+  (so required status checks never stay pending), while the heavy jobs only run when relevant paths changed.
+inputs:
+  pattern:
+    description: Extended regex matched against changed file paths (git grep -E style), e.g. '^(app/backend/|\.github/)'
+    required: true
+outputs:
+  run:
+    description: '"true" when a matching file changed (always "true" for pushes to main when force is set)'
+    value: ${{ steps.diff.outputs.run }}
+runs:
+  using: composite
+  steps:
+    - id: diff
+      shell: bash
+      env:
+        PATTERN: ${{ inputs.pattern }}
+        EVENT: ${{ github.event_name }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BEFORE_SHA: ${{ github.event.before }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        if [ "$EVENT" = "pull_request" ]; then
+          base="$BASE_SHA"; head="$HEAD_SHA"
+        elif [ "$EVENT" = "push" ] && [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+          base="$BEFORE_SHA"; head="$SHA"
+        else
+          echo "run=true" >> "$GITHUB_OUTPUT"; exit 0   # manual run / first push: run everything
+        fi
+        git fetch --no-tags --depth=200 origin "$base" "$head" 2>/dev/null || true
+        if ! files=$(git diff --name-only "$base" "$head" 2>/dev/null); then
+          echo "run=true" >> "$GITHUB_OUTPUT"; exit 0   # cannot diff: be safe and run
+        fi
+        echo "Changed files:"; echo "$files"
+        if echo "$files" | grep -Eq "$PATTERN"; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
